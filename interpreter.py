@@ -351,7 +351,7 @@ class Interpreter:
         var_name = node.var_name_tok.value
         value = self.visit(node.value_node, env)
         env.set(var_name, value)
-        return value
+        return None
 
     def visit_BinOpNode(self, node, env):
         left = self.visit(node.left_node, env)
@@ -383,7 +383,7 @@ class Interpreter:
     def visit_PrintNode(self, node, env):
         value = self.visit(node.node, env)
         print(value)
-        return value
+        return None
 
     def visit_ListNode(self, node, env):
         results = []
@@ -458,9 +458,9 @@ if z > 25 then print z else print x
             if result is not None:
                 if isinstance(result, list) and len(result) > 0:
                     last_val = result[-1]
-                    if last_val is not None:
-                        # Don't print if it was already handled by PrintNode visit
-                        pass 
+                    # Print result if it's an expression (not None) and primitive
+                    if last_val is not None and isinstance(last_val, (int, float)):
+                        print(last_val)
         except EOFError:
             break
         except KeyboardInterrupt:
