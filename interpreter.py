@@ -1,428 +1,500 @@
+import argparse
+import re
 import sys
+from dataclasses import dataclass
 
-# --- Debug Flag ---
-DEBUG_MODE = False
 
-# --- Error Classes ---
-class Error(Exception):
-    def __init__(self, name, message, pos):
-        self.name = name
-        self.message = message
-        self.pos = pos
+class CompilerError(Exception):
+    pass
 
-    def __str__(self):
-        return f"{self.name}: {self.message} at position {self.pos}"
 
-class IllegalCharError(Error):
-    def __init__(self, message, pos):
-        super().__init__("Illegal Character Error", message, pos)
-
-class InvalidSyntaxError(Error):
-    def __init__(self, message, pos):
-        super().__init__("Invalid Syntax Error", message, pos)
-
-class RuntimeError(Error):
-    def __init__(self, message, pos):
-        super().__init__("Runtime Error", message, pos)
-
-# --- Constants & Token Types ---
-TT_INT      = 'INT'
-TT_FLOAT    = 'FLOAT'
-TT_ID       = 'ID'
-TT_KEYWORD  = 'KEYWORD'
-TT_PLUS     = 'PLUS'
-TT_MINUS    = 'MINUS'
-TT_MUL      = 'MUL'
-TT_DIV      = 'DIV'
-TT_EQ       = 'EQ'
-TT_EE       = 'EE'
-TT_GT       = 'GT'
-TT_LT       = 'LT'
-TT_LPAREN   = 'LPAREN'
-TT_RPAREN   = 'RPAREN'
-TT_EOF      = 'EOF'
-TT_NEWLINE  = 'NEWLINE'
-
-KEYWORDS = ['let', 'if', 'then', 'else', 'while', 'do', 'print']
-
-# --- Token Class ---
+@dataclass
 class Token:
-    def __init__(self, type_, value=None, pos=None):
-        self.type = type_
-        self.value = value
-        self.pos = pos
+    type: str
+    value: str
+    position: int
 
-    def __repr__(self):
-        if self.value is not None: return f'{self.type}:{self.value}'
-        return f'{self.type}'
 
-# --- Lexer ---
+# =========================================================
+# PHASE 1: LEXER
+# =========================================================
+
+
 class Lexer:
-    def __init__(self, text):
-        self.text = text
-        self.pos = -1
-        self.current_char = None
-        self.advance()
+    KEYWORDS = {"function": "FUNCTION", "return": "RETURN"}
+    SYMBOLS = {
+        "(": "LPAREN",
+        ")": "RPAREN",
+        "{": "LBRACE",
+        "}": "RBRACE",
+        ";": "SEMICOLON",
+    }
 
-    def advance(self):
-        self.pos += 1
-        self.current_char = self.text[self.pos] if self.pos < len(self.text) else None
+    def __init__(self, code):
+        self.code = code
+        self.pos = 0
 
-    def make_tokens(self):
+    def tokenize(self):
         tokens = []
-        while self.current_char is not None:
-            pos_start = self.pos
-            if self.current_char in ' \t':
-                self.advance()
-            elif self.current_char in '\n;':
-                tokens.append(Token(TT_NEWLINE, pos=pos_start))
-                self.advance()
-            elif self.current_char.isdigit():
-                tokens.append(self.make_number())
-            elif self.current_char.isalpha():
-                tokens.append(self.make_identifier())
-            elif self.current_char == '+':
-                tokens.append(Token(TT_PLUS, pos=pos_start))
-                self.advance()
-            elif self.current_char == '-':
-                tokens.append(Token(TT_MINUS, pos=pos_start))
-                self.advance()
-            elif self.current_char == '*':
-                tokens.append(Token(TT_MUL, pos=pos_start))
-                self.advance()
-            elif self.current_char == '/':
-                tokens.append(Token(TT_DIV, pos=pos_start))
-                self.advance()
-            elif self.current_char == '(':
-                tokens.append(Token(TT_LPAREN, pos=pos_start))
-                self.advance()
-            elif self.current_char == ')':
-                tokens.append(Token(TT_RPAREN, pos=pos_start))
-                self.advance()
-            elif self.current_char == '=':
-                tokens.append(self.make_equals())
-            elif self.current_char == '>':
-                tokens.append(Token(TT_GT, pos=pos_start))
-                self.advance()
-            elif self.current_char == '<':
-                tokens.append(Token(TT_LT, pos=pos_start))
-                self.advance()
-            else:
-                raise IllegalCharError(f"'{self.current_char}'", self.pos)
 
-        tokens.append(Token(TT_EOF, pos=self.pos))
+        while self.pos < len(self.code):
+            char = self.code[self.pos]
+
+            if char.isspace():
+                self.pos += 1
+                continue
+
+            if self.code.startswith("//", self.pos):
+                self._skip_line_comment()
+                continue
+
+            if self.code.startswith("/*", self.pos):
+                self._skip_block_comment()
+                continue
+
+            if char in self.SYMBOLS:
+                tokens.append(Token(self.SYMBOLS[char], char, self.pos))
+                self.pos += 1
+                continue
+
+            if char == "<":
+                tokens.append(self._read_jsx())
+                continue
+
+            if char.isalpha() or char == "_":
+                tokens.append(self._read_identifier_or_keyword())
+                continue
+
+            raise CompilerError(f"Unexpected character {char!r} at position {self.pos}")
+
+        tokens.append(Token("EOF", "", self.pos))
         return tokens
 
-    def make_number(self):
-        num_str = ''
-        pos_start = self.pos
-        dot_count = 0
-        while self.current_char is not None and (self.current_char.isdigit() or self.current_char == '.'):
-            if self.current_char == '.':
-                if dot_count == 1: break
-                dot_count += 1
-            num_str += self.current_char
-            self.advance()
-        if dot_count == 0:
-            return Token(TT_INT, int(num_str), pos=pos_start)
-        return Token(TT_FLOAT, float(num_str), pos=pos_start)
+    def _skip_line_comment(self):
+        next_newline = self.code.find("\n", self.pos)
+        self.pos = len(self.code) if next_newline == -1 else next_newline + 1
 
-    def make_identifier(self):
-        id_str = ''
-        pos_start = self.pos
-        while self.current_char is not None and (self.current_char.isalnum() or self.current_char == '_'):
-            id_str += self.current_char
-            self.advance()
-        tok_type = TT_KEYWORD if id_str in KEYWORDS else TT_ID
-        return Token(tok_type, id_str, pos=pos_start)
+    def _skip_block_comment(self):
+        end = self.code.find("*/", self.pos + 2)
+        if end == -1:
+            raise CompilerError("Unclosed block comment")
+        self.pos = end + 2
 
-    def make_equals(self):
-        pos_start = self.pos
-        self.advance()
-        if self.current_char == '=':
-            self.advance()
-            return Token(TT_EE, pos=pos_start)
-        return Token(TT_EQ, pos=pos_start)
+    def _read_identifier_or_keyword(self):
+        start = self.pos
+        while self.pos < len(self.code) and (
+            self.code[self.pos].isalnum() or self.code[self.pos] == "_"
+        ):
+            self.pos += 1
 
-# --- AST Nodes ---
-class NumberNode:
-    def __init__(self, tok):
-        self.tok = tok
-        self.pos = tok.pos
-    def __repr__(self): return str(self.tok.value)
+        value = self.code[start:self.pos]
+        token_type = self.KEYWORDS.get(value, "IDENT")
+        return Token(token_type, value, start)
 
-class VarAccessNode:
-    def __init__(self, var_name_tok):
-        self.var_name_tok = var_name_tok
-        self.pos = var_name_tok.pos
-    def __repr__(self): return str(self.var_name_tok.value)
+    def _read_jsx(self):
+        start = self.pos
+        depth = 0
+        root_tag = None
 
-class VarAssignNode:
-    def __init__(self, var_name_tok, value_node):
-        self.var_name_tok = var_name_tok
-        self.value_node = value_node
-        self.pos = var_name_tok.pos
-    def __repr__(self): return f"(Assign {self.var_name_tok.value} = {self.value_node})"
+        while self.pos < len(self.code):
+            if self.code[self.pos] != "<":
+                self.pos += 1
+                continue
 
-class BinOpNode:
-    def __init__(self, left_node, op_tok, right_node):
-        self.left_node = left_node
-        self.op_tok = op_tok
-        self.right_node = right_node
-        self.pos = op_tok.pos
-    def __repr__(self): return f"({self.left_node} {self.op_tok.type} {self.right_node})"
+            tag_end = self.code.find(">", self.pos)
+            if tag_end == -1:
+                raise CompilerError("Unclosed JSX tag")
 
-class IfNode:
-    def __init__(self, condition, then_stmt, else_stmt=None):
-        self.condition = condition
-        self.then_stmt = then_stmt
-        self.else_stmt = else_stmt
-        self.pos = condition.pos
-    def __repr__(self): return f"(If {self.condition} Then {self.then_stmt} Else {self.else_stmt})"
+            tag_text = self.code[self.pos : tag_end + 1]
+            tag_name = self._tag_name(tag_text)
 
-class WhileNode:
-    def __init__(self, condition, body_node):
-        self.condition = condition
-        self.body_node = body_node
-        self.pos = condition.pos
-    def __repr__(self): return f"(While {self.condition} Do {self.body_node})"
+            if tag_name:
+                if tag_text.startswith("</"):
+                    depth -= 1
+                    if depth < 0:
+                        raise CompilerError(f"Unexpected closing JSX tag </{tag_name}>")
+                    if depth == 0 and tag_name == root_tag:
+                        self.pos = tag_end + 1
+                        return Token("JSX", self.code[start:self.pos], start)
+                elif not tag_text.endswith("/>"):
+                    if depth == 0:
+                        root_tag = tag_name
+                    depth += 1
 
-class PrintNode:
-    def __init__(self, node):
-        self.node = node
-        self.pos = node.pos
-    def __repr__(self): return f"(Print {self.node})"
+            self.pos = tag_end + 1
 
-class ListNode:
-    def __init__(self, nodes):
-        self.nodes = nodes
-        self.pos = nodes[0].pos if nodes else 0
-    def __repr__(self): return f"[ {', '.join(map(repr, self.nodes))} ]"
+        raise CompilerError("Unclosed JSX expression")
 
-# --- Parser ---
+    @staticmethod
+    def _tag_name(tag_text):
+        match = re.match(r"</?\s*([A-Za-z][A-Za-z0-9]*)", tag_text)
+        return match.group(1) if match else None
+
+
+# =========================================================
+# PHASE 2: PARSER (AST)
+# =========================================================
+
+
 class Parser:
     def __init__(self, tokens):
         self.tokens = tokens
-        self.tok_idx = -1
-        self.advance()
+        self.pos = 0
 
-    def advance(self):
-        self.tok_idx += 1
-        self.current_tok = self.tokens[self.tok_idx] if self.tok_idx < len(self.tokens) else None
-        return self.current_tok
+    def current(self):
+        return self.tokens[self.pos]
+
+    def eat(self, token_type):
+        token = self.current()
+        if token.type != token_type:
+            raise CompilerError(
+                f"Expected {token_type}, found {token.type} ({token.value!r}) "
+                f"at position {token.position}"
+            )
+        self.pos += 1
+        return token
 
     def parse(self):
-        res = self.statements()
-        if self.current_tok.type != TT_EOF:
-            raise InvalidSyntaxError(f"Unexpected token '{self.current_tok.type}'", self.current_tok.pos)
-        return res
+        ast = self.parse_function()
+        self.eat("EOF")
+        return ast
 
-    def statements(self):
-        statements = []
-        while self.current_tok.type == TT_NEWLINE: self.advance()
-        stmt = self.statement()
-        if stmt: statements.append(stmt)
-        while True:
-            newline_count = 0
-            while self.current_tok.type == TT_NEWLINE:
-                self.advance()
-                newline_count += 1
-            if newline_count == 0: break
-            stmt = self.statement()
-            if not stmt: break
-            statements.append(stmt)
-        return ListNode(statements)
+    def parse_function(self):
+        self.eat("FUNCTION")
+        name = self.eat("IDENT").value
+        self.eat("LPAREN")
+        self.eat("RPAREN")
+        self.eat("LBRACE")
+        self.eat("RETURN")
 
-    def statement(self):
-        if self.current_tok.type == TT_EOF: return None
-        if self.current_tok.type == TT_KEYWORD:
-            if self.current_tok.value == 'let':
-                self.advance()
-                if self.current_tok.type != TT_ID: raise InvalidSyntaxError("Expected identifier after 'let'", self.current_tok.pos)
-                var_name = self.current_tok
-                self.advance()
-                if self.current_tok.type != TT_EQ: raise InvalidSyntaxError("Expected '='", self.current_tok.pos)
-                self.advance()
-                return VarAssignNode(var_name, self.expr())
-            elif self.current_tok.value == 'print':
-                self.advance()
-                return PrintNode(self.expr())
-            elif self.current_tok.value == 'if':
-                return self.if_stmt()
-            elif self.current_tok.value == 'while':
-                self.advance()
-                condition = self.expr()
-                if self.current_tok.type != TT_KEYWORD or self.current_tok.value != 'do':
-                    raise InvalidSyntaxError("Expected 'do'", self.current_tok.pos)
-                self.advance()
-                return WhileNode(condition, self.statement())
+        if self.current().type == "LPAREN":
+            self.eat("LPAREN")
+            jsx = self.eat("JSX").value
+            self.eat("RPAREN")
+        else:
+            jsx = self.eat("JSX").value
 
-        if self.current_tok.type == TT_ID:
-            if self.tok_idx + 1 < len(self.tokens) and self.tokens[self.tok_idx+1].type == TT_EQ:
-                var_name = self.current_tok
-                self.advance(); self.advance()
-                return VarAssignNode(var_name, self.expr())
-        return self.expr()
+        if self.current().type == "SEMICOLON":
+            self.eat("SEMICOLON")
 
-    def if_stmt(self):
-        self.advance()
-        condition = self.expr()
-        if self.current_tok.value != 'then': raise InvalidSyntaxError("Expected 'then'", self.current_tok.pos)
-        self.advance()
-        then_stmt = self.statement()
-        else_stmt = None
-        if self.current_tok.value == 'else':
-            self.advance()
-            else_stmt = self.statement()
-        return IfNode(condition, then_stmt, else_stmt)
+        self.eat("RBRACE")
 
-    def expr(self):
-        node = self.arith_expr()
-        if self.current_tok.type in (TT_GT, TT_LT, TT_EE):
-            op_tok = self.current_tok
-            self.advance()
-            node = BinOpNode(node, op_tok, self.arith_expr())
-        return node
+        return {
+            "type": "Function",
+            "name": name,
+            "body": {"type": "JSX", "value": jsx},
+        }
 
-    def arith_expr(self): return self.bin_op(self.term, (TT_PLUS, TT_MINUS))
-    def term(self): return self.bin_op(self.factor, (TT_MUL, TT_DIV))
 
-    def factor(self):
-        tok = self.current_tok
-        if tok.type in (TT_INT, TT_FLOAT):
-            self.advance(); return NumberNode(tok)
-        elif tok.type == TT_ID:
-            self.advance(); return VarAccessNode(tok)
-        elif tok.type == TT_LPAREN:
-            self.advance()
-            expr = self.expr()
-            if self.current_tok.type != TT_RPAREN: raise InvalidSyntaxError("Expected ')'", self.current_tok.pos)
-            self.advance(); return expr
-        elif tok.type in (TT_PLUS, TT_MINUS):
-            self.advance(); return BinOpNode(NumberNode(Token(TT_INT, 0)), tok, self.factor())
-        raise InvalidSyntaxError(f"Unexpected token '{tok.type}'", tok.pos)
+# =========================================================
+# PHASE 3: SEMANTIC ANALYSIS
+# =========================================================
 
-    def bin_op(self, func, ops):
-        left = func()
-        while self.current_tok.type in ops:
-            op_tok = self.current_tok
-            self.advance()
-            left = BinOpNode(left, op_tok, func())
-        return left
 
-# --- Interpreter ---
-class Interpreter:
-    def visit(self, node, env):
-        method_name = f'visit_{type(node).__name__}'
-        method = getattr(self, method_name, self.no_visit_method)
-        return method(node, env)
+class Semantic:
+    HTML_TAGS = {
+        "a",
+        "article",
+        "button",
+        "div",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "header",
+        "img",
+        "input",
+        "label",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "section",
+        "span",
+        "strong",
+        "ul",
+    }
 
-    def no_visit_method(self, node, env):
-        raise Exception(f'No visit_{type(node).__name__} method defined')
+    def check(self, ast):
+        if ast["type"] != "Function":
+            raise CompilerError("Only function components are supported")
 
-    def visit_NumberNode(self, node, env): return node.tok.value
-    def visit_VarAccessNode(self, node, env):
-        var_name = node.var_name_tok.value
-        val = env.get(var_name)
-        if val is None: raise RuntimeError(f"Variable '{var_name}' is not defined", node.pos)
-        return val
+        if not re.match(r"^[A-Z][A-Za-z0-9_]*$", ast["name"]):
+            raise CompilerError("Component function name must start with a capital letter")
 
-    def visit_VarAssignNode(self, node, env):
-        value = self.visit(node.value_node, env)
-        env.set(node.var_name_tok.value, value)
-        return None
+        jsx = ast["body"]["value"].strip()
+        if not jsx:
+            raise CompilerError("Empty return is not allowed")
 
-    def visit_BinOpNode(self, node, env):
-        left, right = self.visit(node.left_node, env), self.visit(node.right_node, env)
-        if node.op_tok.type == TT_PLUS: return left + right
-        if node.op_tok.type == TT_MINUS: return left - right
-        if node.op_tok.type == TT_MUL: return left * right
-        if node.op_tok.type == TT_DIV:
-            if right == 0: raise RuntimeError("Division by zero", node.pos)
-            return left / right
-        if node.op_tok.type == TT_GT: return 1 if left > right else 0
-        if node.op_tok.type == TT_LT: return 1 if left < right else 0
-        if node.op_tok.type == TT_EE: return 1 if left == right else 0
+        if "{" in jsx or "}" in jsx:
+            raise CompilerError("JSX expressions like {name} are not supported in this subset")
 
-    def visit_IfNode(self, node, env):
-        condition_val = self.visit(node.condition, env)
-        if condition_val:
-            return self.visit(node.then_stmt, env)
-        elif node.else_stmt:
-            return self.visit(node.else_stmt, env)
-        return None
+        self._check_balanced_tags(jsx)
+        return True
 
-    def visit_WhileNode(self, node, env):
-        while self.visit(node.condition, env): self.visit(node.body_node, env)
-        return None
+    def _check_balanced_tags(self, jsx):
+        stack = []
+        for tag in re.findall(r"<[^>]+>", jsx):
+            tag_name = self._tag_name(tag)
+            if not tag_name:
+                continue
+            if tag.startswith("</"):
+                if not stack or stack[-1] != tag_name:
+                    raise CompilerError(f"Mismatched closing tag </{tag_name}>")
+                stack.pop()
+            elif not tag.endswith("/>"):
+                stack.append(tag_name)
 
-    def visit_PrintNode(self, node, env):
-        val = self.visit(node.node, env)
-        print(val); return None
+        if stack:
+            raise CompilerError(f"Unclosed JSX tag <{stack[-1]}>")
 
-    def visit_ListNode(self, node, env):
-        results = []
-        for element in node.nodes: results.append(self.visit(element, env))
-        return results
+    @staticmethod
+    def _tag_name(tag_text):
+        match = re.match(r"</?\s*([A-Za-z][A-Za-z0-9]*)", tag_text)
+        return match.group(1) if match else None
+    HTML_TAGS = {
+        "a",
+        "article",
+        "button",
+        "div",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "header",
+        "img",
+        "input",
+        "label",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "section",
+        "span",
+        "strong",
+        "ul",
+    }
 
-# --- Environment ---
-class Environment:
-    def __init__(self, parent=None):
-        self.values = {}
-        self.parent = parent
-    def get(self, name):
-        val = self.values.get(name)
-        if val is not None: return val
-        if self.parent: return self.parent.get(name)
-        return None
-    def set(self, name, value): self.values[name] = value
-    def print_env(self):
-        print("--- Environment Variables ---")
-        for k, v in self.values.items(): print(f"{k}: {v}")
-        print("-----------------------------")
+    def check(self, ast):
+        if ast["type"] != "Function":
+            raise CompilerError("Only function components are supported")
 
-# --- Runner ---
-def run(text, env):
-    try:
-        lexer = Lexer(text)
-        tokens = lexer.make_tokens()
-        if DEBUG_MODE: print(f"DEBUG TOKENS: {tokens}")
-        parser = Parser(tokens)
-        ast = parser.parse()
-        if DEBUG_MODE: print(f"DEBUG AST: {ast}")
-        interpreter = Interpreter()
-        return interpreter.visit(ast, env)
-    except Error as e:
-        print(e); return None
-    except Exception as e:
-        print(f"Internal Error: {e}"); return None
+        if not re.match(r"^[A-Z][A-Za-z0-9_]*$", ast["name"]):
+            raise CompilerError("Component function name must start with a capital letter")
 
-# --- Main REPL ---
-if __name__ == "__main__":
-    global_env = Environment()
-    print("=== Mini Programming Language Interpreter ===")
-    print("Commands: :debug (toggle), :env (show vars), exit")
+        jsx = ast["body"]["value"].strip()
+        if not jsx:
+            raise CompilerError("Empty return is not allowed")
+
+        if "{" in jsx or "}" in jsx:
+            raise CompilerError("JSX expressions like {name} are not supported in this subset")
+
+        self._check_balanced_tags(jsx)
+        return True
+
+    def _check_balanced_tags(self, jsx):
+        stack = []
+        for tag in re.findall(r"<[^>]+>", jsx):
+            tag_name = self._tag_name(tag)
+            if not tag_name:
+                continue
+            if tag.startswith("</"):
+                if not stack or stack[-1] != tag_name:
+                    raise CompilerError(f"Mismatched closing tag </{tag_name}>")
+                stack.pop()
+            elif not tag.endswith("/>"):
+                stack.append(tag_name)
+
+        if stack:
+            raise CompilerError(f"Unclosed JSX tag <{stack[-1]}>")
+
+    @staticmethod
+    def _tag_name(tag_text):
+        match = re.match(r"</?\s*([A-Za-z][A-Za-z0-9]*)", tag_text)
+        return match.group(1) if match else None
+
+
+# =========================================================
+# PHASE 4: IR GENERATION
+# =========================================================
+
+
+class IR:
+    def generate(self, ast):
+        return {
+            "component": ast["name"],
+            "template": ast["body"]["value"].strip(),
+        }
+
+
+# =========================================================
+# PHASE 5: OPTIMIZER / JSX TO ANGULAR TEMPLATE
+# =========================================================
+
+
+class Optimizer:
+    ATTRIBUTE_MAP = {
+        "className": "class",
+        "htmlFor": "for",
+    }
+
+    def optimize(self, ir):
+        template = ir["template"]
+        template = self._normalize_whitespace(template)
+        template = self._convert_attributes(template)
+        ir["template"] = template
+        ir["selector"] = "app-" + self._to_kebab_case(ir["component"])
+        return ir
+
+    @staticmethod
+    def _normalize_whitespace(template):
+        template = re.sub(r"\s+", " ", template)
+        template = re.sub(r">\s+<", "><", template)
+        return template.strip()
+
+    def _convert_attributes(self, template):
+        for react_name, angular_name in self.ATTRIBUTE_MAP.items():
+            template = re.sub(rf"\b{react_name}\s*=", f"{angular_name}=", template)
+        return template
+
+    @staticmethod
+    def _to_kebab_case(name):
+        return re.sub(r"(?<!^)([A-Z])", r"-\1", name).replace("_", "-").lower()
+
+# =========================================================
+# PHASE 6: ANGULAR CODE GENERATOR
+# =========================================================
+
+
+class AngularGenerator:
+    def generate(self, ir):
+        escaped_template = ir["template"].replace("`", "\\`")
+        return f"""import {{ Component }} from '@angular/core';
+
+@Component({{
+  selector: '{ir["selector"]}',
+  template: `{escaped_template}`
+}})
+export class {ir["component"]}Component {{}}
+"""
+
+
+# =========================================================
+# COMPILER PIPELINE
+# =========================================================
+
+
+def compile_react_to_angular(code, verbose=True):
+    if verbose:
+        print("\n====================")
+        print("SOURCE CODE")
+        print("====================")
+        print(code)
+
+    lexer = Lexer(code)
+    tokens = lexer.tokenize()
+
+    if verbose:
+        print("\n1. LEXICAL ANALYSIS")
+        print([(token.type, token.value) for token in tokens if token.type != "EOF"])
+
+    parser = Parser(tokens)
+    ast = parser.parse()
+
+    if verbose:
+        print("\n2. SYNTAX ANALYSIS (AST)")
+        print(ast)
+
+    semantic = Semantic()
+    semantic.check(ast)
+
+    if verbose:
+        print("\n3. SEMANTIC ANALYSIS PASSED")
+
+    ir_gen = IR()
+    ir = ir_gen.generate(ast)
+
+    if verbose:
+        print("\n4. INTERMEDIATE REPRESENTATION")
+        print(ir)
+
+    optimizer = Optimizer()
+    optimized = optimizer.optimize(ir)
+
+    if verbose:
+        print("\n5. OPTIMIZED IR")
+        print(optimized)
+
+    generator = AngularGenerator()
+    output = generator.generate(optimized)
+
+    if verbose:
+        print("\n6. ANGULAR OUTPUT")
+        print(output)
+
+    return output
+
+
+def read_interactive_code():
+    print("Paste React component code. Finish with a line containing only END:")
+    lines = []
     while True:
         try:
-            lines = []
-            while True:
-                prompt = "mini-lang > " if not lines else "... "
-                line = input(prompt)
-                if line.strip() == "": break
-                lines.append(line)
-            text = "\n".join(lines)
-            if not text.strip(): continue
-            if text.strip() == "exit": break
-            if text.strip() == ":debug":
-                DEBUG_MODE = not DEBUG_MODE
-                print(f"Debug Mode: {'ON' if DEBUG_MODE else 'OFF'}")
-                continue
-            if text.strip() == ":env":
-                global_env.print_env(); continue
-            
-            result = run(text, global_env)
-            if result is not None and isinstance(result, list) and len(result) > 0:
-                last_val = result[-1]
-                if last_val is not None and isinstance(last_val, (int, float)): print(last_val)
-        except (EOFError, KeyboardInterrupt):
-            print("\nExiting..."); break
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == "END":
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Compile a small subset of React function components to Angular components."
+    )
+    input_group = parser.add_mutually_exclusive_group()
+    input_group.add_argument("--code", help="React component source code")
+    input_group.add_argument("--file", help="Path to a file containing React component source code")
+    parser.add_argument("--output", "-o", help="Write generated Angular code to this file")
+    parser.add_argument("--quiet", action="store_true", help="Only print the final Angular output")
+    return parser
+
+
+def main(argv=None):
+    args = build_arg_parser().parse_args(argv)
+
+    if args.code:
+        code = args.code
+    elif args.file:
+        with open(args.file, "r", encoding="utf-8") as source_file:
+            code = source_file.read()
+    else:
+        code = read_interactive_code()
+
+    if not code.strip():
+        print("No input code provided.", file=sys.stderr)
+        return 1
+
+    try:
+        output = compile_react_to_angular(code, verbose=not args.quiet)
+    except CompilerError as error:
+        print(f"Compiler error: {error}", file=sys.stderr)
+        return 1
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as output_file:
+            output_file.write(output)
+        print(f"Angular component written to {args.output}")
+    elif args.quiet:
+        print(output)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
